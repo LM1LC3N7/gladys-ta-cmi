@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-20
+
 ### Added
 
 - Technische Alternative controllers through the JSON API of the C.M.I., read
@@ -43,4 +45,5 @@ the notes of the version's GitHub Release.
 - A wall clock set back no longer holds the reads for that long.
 - A device type sent as a number in the answer is recognized.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-ta-cmi/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-ta-cmi/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-ta-cmi/releases/tag/v0.1.1
