@@ -232,10 +232,19 @@ function channelOf(section, entry) {
   return { section, number, digital, unit, value: reading };
 }
 
-/** The device type of an answer (its header), undefined when unknown. */
+/**
+ * The device type of an answer (its header), undefined when unknown. A string
+ * ("87", "8f") or an integer (87: a firmware may send the decimal-looking ids
+ * as numbers).
+ */
 export function deviceTypeOf(root) {
   const device = own(own(root, 'Header'), 'Device');
-  const id = typeof device === 'string' ? device.toUpperCase() : undefined;
+  const id =
+    typeof device === 'string'
+      ? device.trim().toUpperCase()
+      : Number.isInteger(device) && device >= 0 && device <= 99
+        ? String(device)
+        : undefined;
   return id !== undefined && Object.hasOwn(DEVICES, id) ? id : undefined;
 }
 

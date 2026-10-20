@@ -30,4 +30,17 @@ the notes of the version's GitHub Release.
   are sent again at each reconnection to Gladys.
 - Device and feature names in French or English.
 
+### Fixed
+
+- A UVR65 or CAN-MTx2 on the CAN bus no longer stops the reads: it is read
+  with the default parameters, and an internal error never leaves the
+  integration without its next read.
+- After a restart, the next request waits 75 s from the end of the previous
+  one (not its start); when the state in `/data` cannot be read or written,
+  the first request waits 75 s.
+- A restart during a "too many requests" pause no longer shows the
+  integration as disconnected after successful reads.
+- A wall clock set back no longer holds the reads for that long.
+- A device type sent as a number in the answer is recognized.
+
 [Unreleased]: https://github.com/LM1LC3N7/gladys-ta-cmi/commits/main

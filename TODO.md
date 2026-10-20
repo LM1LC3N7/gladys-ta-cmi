@@ -22,6 +22,10 @@ up to date at the end of every milestone.
       credentials stop, code 4 / 429 pause, backoff, node errors, badges,
       test button, en/fr, docs, cover. Tested against a fake C.M.I. only
       (Node 22 and 24).
+- [x] **Review 1 fixes** (2026-10-20, review of b40e905): B1 a UVR65 (8E) or
+      CAN-MTx2 (8C) uses the default parameters, and an internal error never
+      leaves the integration without a timer; I1 the gate counts from the end
+      of the previous request across restarts; M1 to M6.
 - [ ] **Milestone 2 — real C.M.I.**: run against a real C.M.I. with a
       UVR16x2 (see "To check"); turn the answers (anonymized) into fixtures.
 - [ ] **Milestone 3 — first release**: Docker image build check, Release
@@ -40,6 +44,10 @@ up to date at the end of every milestone.
 - Whether the gap of 75 s can be shortened to ~62 s safely (counted from the
   end of the previous request).
 - The size of a full "all" answer of a UVR16x2 (256 KB limit here).
+- The charset of the Basic header: the user and the password are encoded in
+  UTF-8 here (`src/client.js` `authorization()`); check that the C.M.I.
+  accepts a password with accented characters (it may expect Latin-1).
+- `Header.Device` as a string ("87", "8F") or a number (87): both read.
 
 ## Decisions
 
@@ -71,6 +79,22 @@ up to date at the end of every milestone.
   The node list counts as a request. A fake C.M.I. in the tests answers code
   4 to any request closer than 60 s and every end-to-end test asserts the
   spacing.
+- **The time of the last request in `/data`** (review I1, M2): before a
+  request leaves, its latest possible end (start + 20 s timeout) is saved;
+  after it, its real end. At start the time read back is capped at now. When
+  `/data` cannot be read (anything but "no file", which is a fresh install),
+  holds a file without that time, or cannot be written, the time is unknown:
+  the first request waits a full 75 s. A save failure is logged once until a
+  save succeeds again; the requests still go (never faster than the gate).
+- **Never without a timer** (review B1): a known type without a parameter
+  list of its own (UVR65 `8E`, CAN-MTx2 `8C`, as the reference) uses `I,O`;
+  any internal error of a step or of the start drops the cycle, sets a
+  backoff (never under the interval) and schedules the next step.
+- **Wall clock set back** (review M3): the last request and the cycle start
+  are capped at now, so the gate never holds more than one gap and the
+  interval never more than one interval.
+- **"Read once" in `/data`** (review M1): a restart during a 429 pause after
+  successful reads shows "connected", as without a restart.
 - **Cycles**: every refresh interval (default 300 s, 120 to 3600), one queue
   of requests; one request per step; the next step at the gate; the next
   cycle at max(cycle start + interval, gate). The test button and a Discovery

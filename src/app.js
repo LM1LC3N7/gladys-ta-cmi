@@ -102,12 +102,33 @@ export class CmiApp {
   // --- Lifecycle -------------------------------------------------------------
 
   /** `fresh`: the user changed the address or the account, the stop is lifted. */
-  async start(raw = {}, { fresh = false } = {}) {
+  async start(raw = {}, options = {}) {
+    try {
+      await this.startNow(raw, options);
+    } catch (err) {
+      // Never left without a timer, whatever failed.
+      await this.recover(err, this.generation);
+    }
+  }
+
+  async startNow(raw = {}, { fresh = false } = {}) {
     this.stop();
     await this.running;
     this.config = normalizeConfig(raw);
     this.reset();
-    const saved = normalizeMemory(await this.store.load().catch(() => null), this.now());
+    // `known`: the time of the last request is known (no file: a fresh
+    // install, nothing was ever sent from here).
+    let loaded = null;
+    let known = true;
+    try {
+      loaded = await this.store.load();
+    } catch {
+      known = false;
+    }
+    const saved = normalizeMemory(loaded, this.now());
+    if (loaded !== null && saved.lastRequestAt === null) {
+      known = false;
+    }
     // The time of the last request applies whatever the C.M.I. (strict limit).
     this.client.remember(saved.lastRequestAt ?? undefined);
     this.memory = saved;
@@ -120,6 +141,7 @@ export class CmiApp {
         block: null,
         nodes: null,
         types: {},
+        read: false,
       };
     }
     if (fresh) {
@@ -137,7 +159,13 @@ export class CmiApp {
       this.retryAt = block.retryAt;
     }
     this.client.configure(this.config);
-    await this.saveMemory();
+    if (!(await this.saveMemory()) || !known) {
+      // /data unreadable or not writable: the time of the last request may
+      // be lost (or not kept for the next restart). The first request waits a
+      // full gap, as if one had just ended.
+      this.client.remember(this.now());
+      this.logger.warn('C.M.I.: time of the last request unknown, the first request waits 75 s');
+    }
     this.publisher.start();
     const missing = this.configMessage();
     if (missing) {
@@ -150,8 +178,9 @@ export class CmiApp {
       return;
     }
     if (this.now() < this.pausedUntil) {
+      // A 429 pause after successful reads: still "connected", as without a restart.
       await this.setStatus(
-        false,
+        this.ratePaused && this.memory.read === true,
         this.pauseMessage() ?? T.waiting(age(this.pausedUntil - this.now())),
       );
       this.scheduleNext();
@@ -284,10 +313,19 @@ export class CmiApp {
     return JSON.parse(this.lastStatus ?? '[false,null]')[1] ?? undefined;
   }
 
+  /** true when /data was written. A failure is logged once until a save succeeds again. */
   async saveMemory() {
-    await this.store
-      .save(this.memory)
-      .catch((err) => this.logger.warn(`Saving the state to /data failed: ${err.message}`));
+    try {
+      await this.store.save(this.memory);
+      this.saveFailed = false;
+      return true;
+    } catch (err) {
+      if (!this.saveFailed) {
+        this.saveFailed = true;
+        this.logger.warn(`Saving the state to /data failed: ${err?.message ?? err}`);
+      }
+      return false;
+    }
   }
 
   /** The time of a request, kept in /data BEFORE the request leaves. */
@@ -303,6 +341,8 @@ export class CmiApp {
         ? { kind: this.pauseKind, until: this.pausedUntil, failures: this.failures }
         : null;
     this.memory.block = this.blocked ? { retries: this.retries, retryAt: this.retryAt } : null;
+    // Read once at least: a restart during a 429 pause still shows "connected".
+    this.memory.read = this.memory.read === true || this.readAt !== undefined;
     await this.saveMemory();
   }
 
@@ -325,6 +365,8 @@ export class CmiApp {
       return;
     }
     const now = this.now();
+    // The wall clock went back: the cycle started "now" at most.
+    this.cycleStartedAt = Math.min(this.cycleStartedAt, now);
     let at = this.client.nextAllowedAt();
     if (this.blocked) {
       at = Math.max(at, this.retryAt, this.pausedUntil);
@@ -344,7 +386,8 @@ export class CmiApp {
       () => {
         this.timer = undefined;
         if (generation === this.generation) {
-          this.tick().catch((err) => this.logger.error(`C.M.I. refresh failed: ${err.message}`));
+          // tick() never rejects (see recover()).
+          this.tick();
         }
       },
       Math.max(0, at - this.now()),
@@ -358,11 +401,37 @@ export class CmiApp {
    */
   tick({ force = false, manual = false } = {}) {
     if (!this.running) {
-      this.running = this.run({ force, manual }).finally(() => {
-        this.running = undefined;
-      });
+      const generation = this.generation;
+      this.running = this.run({ force, manual })
+        .catch((err) => this.recover(err, generation))
+        .finally(() => {
+          this.running = undefined;
+        });
     }
     return this.running;
+  }
+
+  /**
+   * An internal error (a bug, never a C.M.I. answer, those are handled in
+   * run()): the cycle is dropped, a backoff (never under the interval) is
+   * kept, and the next step is always scheduled: the integration is never
+   * left without a timer.
+   */
+  async recover(err, generation) {
+    this.logger.error(`C.M.I. refresh failed: ${err?.message ?? err}`);
+    if (generation !== this.generation) {
+      return;
+    }
+    this.queue = [];
+    try {
+      await this.failed({ kind: 'internal' });
+    } catch (again) {
+      this.logger.error(`C.M.I. recovery failed: ${again?.message ?? again}`);
+      this.pausedUntil = Math.max(this.pausedUntil, this.now() + this.interval);
+    }
+    if (generation === this.generation) {
+      this.scheduleNext();
+    }
   }
 
   /** The nodes to read: those of the configuration, else the list of the C.M.I. */
@@ -373,7 +442,12 @@ export class CmiApp {
   /** The parameters to ask a node for, in requests of 7 at most. */
   requestsFor(node) {
     const type = this.memory.types[String(node)];
-    const supported = type ? SUPPORTED_PARAMS[type] : DEFAULT_PARAMS;
+    // A known type without a parameter list of its own (UVR65, CAN-MTx2) uses
+    // the default ones, as the reference does (device.py _get_json_params).
+    const supported =
+      type !== undefined && Object.hasOwn(SUPPORTED_PARAMS, type)
+        ? SUPPORTED_PARAMS[type]
+        : DEFAULT_PARAMS;
     const wanted = supported.filter((p) => CHANNEL_SETS[this.config.channels].has(p));
     const requests = [];
     for (let i = 0; i < wanted.length; i += MAX_PARAMS_PER_REQUEST) {
@@ -421,6 +495,7 @@ export class CmiApp {
       return;
     }
     if (this.queue.length === 0) {
+      this.cycleStartedAt = Math.min(this.cycleStartedAt, this.now());
       if (!manual && !retryDue && this.now() < this.cycleStartedAt + this.interval) {
         this.scheduleNext();
         return;

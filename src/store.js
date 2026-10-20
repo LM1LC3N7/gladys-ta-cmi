@@ -20,12 +20,18 @@ export function fileStore(path = STATE_FILE) {
   // One write at a time: two saves never share the temporary file.
   let chain = Promise.resolve();
   return {
+    /** null when there is no file (a fresh install); throws when it cannot be read or parsed. */
     async load() {
+      let text;
       try {
-        return JSON.parse(await readFile(path, 'utf8'));
-      } catch {
-        return null;
+        text = await readFile(path, 'utf8');
+      } catch (err) {
+        if (err?.code === 'ENOENT') {
+          return null;
+        }
+        throw err;
       }
+      return JSON.parse(text);
     },
     save(data) {
       const text = JSON.stringify(data);
@@ -102,5 +108,6 @@ export function normalizeMemory(raw, now = Date.now()) {
     block,
     nodes,
     types,
+    read: key !== '' && raw?.read === true,
   };
 }

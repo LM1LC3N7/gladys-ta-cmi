@@ -5,9 +5,10 @@
 // a time and never before `nextAllowedAt()`: 75 s after the END of the
 // previous request (answer, error or timeout), whatever asks for it (polling,
 // test button, Discovery). It never waits by itself: a request asked too soon
-// is refused (`too_soon`, nothing sent), the app schedules the next one. The
-// time of each request is handed to `onRequest` and awaited BEFORE the request
-// leaves, so the app keeps it in /data and a restart never sends early.
+// is refused (`too_soon`, nothing sent), the app schedules the next one.
+// `onRequest` is awaited BEFORE the request leaves with the latest time it can
+// end (start + timeout), then after it with its real end: the app keeps it in
+// /data, so a restart (even during the request) never sends early.
 //
 // Basic authentication: the header is built here only, never logged nor put
 // in an error.
@@ -69,6 +70,11 @@ export class CmiClient {
 
   /** When the next request may leave. */
   nextAllowedAt() {
+    // The wall clock went back: the last request is "now" at most, so the
+    // gate never holds longer than one gap.
+    if (!this.busy && this.lastAt > this.now()) {
+      this.lastAt = this.now();
+    }
     return this.lastAt + this.gap;
   }
 
@@ -100,7 +106,9 @@ export class CmiClient {
     try {
       const start = this.now();
       this.lastAt = start;
-      await this.onRequest(start);
+      // Kept before the request leaves: the latest time it can end, so a
+      // crash or a restart during the request still counts from its end.
+      await this.onRequest(start + TIMINGS.requestTimeout);
       const { status, headers, body } = await this.transport(
         {
           hostname: this.host,
@@ -129,6 +137,8 @@ export class CmiClient {
     } finally {
       // The gap counts from the end of the request, whatever ended it.
       this.lastAt = Math.max(this.lastAt, this.now());
+      // Then its real end, kept too (a restart counts the gap from it).
+      await this.onRequest(this.lastAt);
       this.busy = false;
     }
   }

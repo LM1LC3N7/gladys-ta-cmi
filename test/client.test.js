@@ -59,7 +59,11 @@ test('the gate: one request at a time, 75 s after the end of the previous one, n
   );
   await client.readNode(1, ['I', 'O']);
   assert.equal(sent.length, 1);
-  assert.deepEqual(kept, [1_000_000], 'kept before the request left');
+  assert.deepEqual(
+    kept,
+    [1_000_000 + TIMINGS.requestTimeout, 1_005_000],
+    'before it leaves, its latest possible end; after, its real end',
+  );
   assert.equal(sent[0].options.path, '/INCLUDE/api.cgi?jsonnode=1&jsonparam=I,O');
   assert.equal(
     sent[0].options.headers.Authorization,
@@ -91,6 +95,10 @@ test('a failed request is spaced too; a time from /data is never in the future',
   assert.equal(fresh.wait(), TIMINGS.requestGap);
   now += TIMINGS.requestGap;
   assert.equal(fresh.wait(), 0);
+  // The wall clock goes back 1 h after a request: one gap at most (review M3).
+  fresh.lastAt = now;
+  now -= 3_600_000;
+  assert.equal(fresh.wait(), TIMINGS.requestGap);
 });
 
 test('HTTP statuses: 401/403 refused, 429 with Retry-After, 5xx unavailable', async () => {

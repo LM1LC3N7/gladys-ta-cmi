@@ -5,7 +5,8 @@
 // THIRD_PARTY_NOTICES.md): the two endpoints, the device type ids, the
 // parameters each device type supports, the channel types, the unit codes and
 // the status codes of the answer. The C.M.I. accepts ONE request per minute
-// (status code 4 otherwise): every request goes through src/gate.js.
+// (status code 4 otherwise): every request goes through the gate of
+// CmiClient.get (src/client.js).
 // -----------------------------------------------------------------------------
 
 /** The manifest action keys. */

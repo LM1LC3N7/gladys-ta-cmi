@@ -35,6 +35,8 @@ async function setup(
     logs = [],
     now = NOW,
     mockTimers = true,
+    // The wall clock seen by the app (its timers stay monotonic, as in Node).
+    clock = { offset: 0 },
   } = {},
 ) {
   if (mockTimers) {
@@ -45,7 +47,7 @@ async function setup(
     gladys,
     logger: recorder(logs),
     transport: server.transport,
-    now: () => Date.now(),
+    now: () => Date.now() + clock.offset,
     store,
   });
   registerHandlers(gladys, app);
@@ -359,4 +361,162 @@ test('a created device keeps every feature; a channel whose unit changed gets no
   assert.equal(last(gladys, 1, 'in-1'), 61.4, 'no % sent into a temperature');
   assert.equal(last(gladys, 1, 'in-2'), 4.5);
   assert.ok(app.nodeData.get(1));
+});
+
+// --- Review 1 ---------------------------------------------------------------
+
+test('B1: a UVR65 (8E) and a CAN-MTx2 (8C) use the default parameters, the polling goes on', async (t) => {
+  const server = fakeCmi({ nodes: { 1: '87', 4: '8C', 5: '8E' } });
+  const { gladys, app, advance } = await setup(t, {
+    server,
+    config: { ...CONFIG, nodes: '1,4,5' },
+  });
+  await advance(3 * GAP);
+  const before = server.requests.length;
+  await advance(60 * MINUTE);
+  assert.ok(server.requests.length >= before + 10, 'still polling after 1 h');
+  assert.ok(app.timer !== undefined, 'a timer is armed');
+  const paths = server.requests.map((r) => r.path);
+  assert.ok(paths.includes('/INCLUDE/api.cgi?jsonnode=4&jsonparam=I,O'));
+  assert.ok(paths.includes('/INCLUDE/api.cgi?jsonnode=5&jsonparam=I,O'));
+  assert.match(message(gladys).en, /Connected: 3\/3 nodes read/);
+  assertSpaced(server);
+});
+
+test('B1: a type 8E kept in /data never makes a restart fail', async (t) => {
+  const store = memoryStore({
+    lastRequestAt: NOW - 10 * MINUTE,
+    key: cmiKey(HOST, 80),
+    types: { 5: '8E' },
+  });
+  const logs = [];
+  const server = fakeCmi({ nodes: { 5: '8E' } });
+  const { app } = await setup(t, { server, store, logs, config: { ...CONFIG, nodes: '5' } });
+  assert.equal(server.requests.length, 1);
+  assert.equal(server.requests[0].path, '/INCLUDE/api.cgi?jsonnode=5&jsonparam=I,O');
+  assert.ok(app.timer !== undefined);
+  assert.ok(!logs.some((l) => /TypeError|failed/.test(l)), logs.join('\n'));
+});
+
+test('B1: an internal error never leaves the integration without a timer', async (t) => {
+  const server = fakeCmi();
+  const logs = [];
+  const { app, advance, gladys } = await setup(t, {
+    server,
+    logs,
+    config: { ...CONFIG, nodes: '1' },
+  });
+  assert.equal(server.requests.length, 1);
+  // A bug outside the request handling (the cycle planning throws once).
+  const startCycle = app.startCycle.bind(app);
+  app.startCycle = () => {
+    app.startCycle = startCycle;
+    throw new TypeError('boom');
+  };
+  await advance(5 * MINUTE + SECOND);
+  assert.equal(server.requests.length, 1);
+  assert.ok(logs.some((l) => /refresh failed: boom/.test(l)));
+  assert.ok(app.timer !== undefined, 'a timer is armed after the error');
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  // A backoff never under the interval (5 min), then the reads go on.
+  await advance(4 * MINUTE);
+  assert.equal(server.requests.length, 1);
+  await advance(2 * MINUTE);
+  assert.equal(server.requests.length, 2);
+  assert.match(message(gladys).en, /Connected: 1\/1 node read/);
+  assertSpaced(server);
+});
+
+test('I1: a restart after a slow answer counts the 75 s from its end', async (t) => {
+  const server = fakeCmi();
+  server.delay = 18 * SECOND;
+  // The previous request ended 70 s ago: the first one leaves 5 s after the start.
+  const store = memoryStore({
+    lastRequestAt: NOW - 70 * SECOND,
+    key: cmiKey(HOST, 80),
+    types: { 1: '87' },
+  });
+  const first = await setup(t, { server, store, config: { ...CONFIG, nodes: '1' } });
+  assert.equal(server.requests.length, 0);
+  await first.advance(5 * SECOND, SECOND);
+  assert.equal(server.requests.length, 1);
+  // Before it leaves, the latest possible end is kept.
+  assert.equal(store.data.lastRequestAt, NOW + 5 * SECOND + TIMINGS.requestTimeout);
+  await first.advance(18 * SECOND, SECOND);
+  assert.equal(server.requests[0].end, NOW + 23 * SECOND);
+  assert.equal(store.data.lastRequestAt, NOW + 23 * SECOND, 'then its real end');
+  first.app.stop();
+  server.delay = 0;
+  const again = await setup(t, {
+    server,
+    store,
+    config: { ...CONFIG, nodes: '1' },
+    mockTimers: false,
+  });
+  assert.equal(server.requests.length, 1);
+  await again.advance(GAP - 2 * SECOND, SECOND);
+  assert.equal(server.requests.length, 1, 'never 75 s from the start only');
+  await again.advance(3 * SECOND, SECOND);
+  assert.equal(server.requests.length, 2);
+  assert.ok(server.requests[1].at - server.requests[0].end >= GAP);
+  assertSpaced(server);
+});
+
+test('M1: a restart during a 429 pause after successful reads still shows connected', async (t) => {
+  const store = memoryStore({
+    lastRequestAt: NOW - 2 * MINUTE,
+    key: cmiKey(HOST, 80),
+    pause: { kind: 'rate', until: NOW + 15 * MINUTE, failures: 2 },
+    types: { 1: '87' },
+    read: true,
+  });
+  const { gladys, server } = await setup(t, { store, config: { ...CONFIG, nodes: '1' } });
+  assert.equal(server.requests.length, 0);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.match(message(gladys).en, /Pause of 15 min/);
+});
+
+test('M2: /data not writable: the first request waits 75 s, the failure is logged once', async (t) => {
+  const store = memoryStore();
+  store.save = async () => {
+    throw new Error('EROFS');
+  };
+  const logs = [];
+  const { server, advance } = await setup(t, { store, logs, config: { ...CONFIG, nodes: '1' } });
+  assert.equal(server.requests.length, 0);
+  await advance(GAP - 5 * SECOND);
+  assert.equal(server.requests.length, 0);
+  await advance(10 * SECOND);
+  assert.equal(server.requests.length, 1);
+  await advance(10 * MINUTE);
+  assert.equal(logs.filter((l) => /Saving the state to \/data failed/.test(l)).length, 1);
+  assertSpaced(server);
+});
+
+test('M2: /data unreadable: the first request waits 75 s', async (t) => {
+  const store = memoryStore();
+  store.load = async () => {
+    throw new SyntaxError('broken');
+  };
+  const { server, advance } = await setup(t, { store, config: { ...CONFIG, nodes: '1' } });
+  assert.equal(server.requests.length, 0);
+  await advance(GAP + SECOND);
+  assert.equal(server.requests.length, 1);
+});
+
+test('M3: the wall clock set back 1 h: the reads go on, one gap at most', async (t) => {
+  const server = fakeCmi();
+  const clock = { offset: 0 };
+  const { advance } = await setup(t, {
+    server,
+    clock,
+    config: { ...CONFIG, nodes: '1', poll_interval: 120 },
+  });
+  assert.equal(server.requests.length, 1);
+  await advance(10 * SECOND);
+  clock.offset = -60 * MINUTE;
+  await advance(30 * MINUTE, 10 * SECOND);
+  // A cycle every 120 s (the gate is 75 s): about 15 in 30 min, none lost to the jump.
+  assert.ok(server.requests.length - 1 >= 13, `${server.requests.length - 1} requests in 30 min`);
+  assertSpaced(server);
 });

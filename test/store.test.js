@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TIMINGS } from '../src/constants.js';
@@ -17,6 +17,7 @@ test('the memory is repaired and bounded when read back', () => {
     block: null,
     nodes: null,
     types: {},
+    read: false,
   });
   const memory = normalizeMemory(
     {
@@ -45,9 +46,12 @@ test('the file store writes atomically, readable by its owner only', async (t) =
   const dir = await mkdtemp(join(tmpdir(), 'ta-cmi-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = fileStore(join(dir, 'state.json'));
-  assert.equal(await store.load(), null);
+  assert.equal(await store.load(), null, 'no file: a fresh install');
   await Promise.all([store.save({ a: 1 }), store.save({ a: 2 })]);
   assert.deepEqual(await store.load(), { a: 2 });
+  // A file that cannot be parsed is not a fresh install: the app must know it.
+  await writeFile(join(dir, 'state.json'), '{broken', 'utf8');
+  await assert.rejects(store.load());
   if (process.platform !== 'win32') {
     assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
   }

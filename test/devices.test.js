@@ -140,6 +140,10 @@ test('ids: device and feature external ids parsed strictly', () => {
   assert.equal(parseFeatureId('ext:x:cmi:node5:zz-1'), undefined);
   assert.equal(deviceTypeOf(answer({ device: '8f' })), '8F');
   assert.equal(deviceTypeOf(answer({ device: '99' })), undefined);
+  // A numeric header (review M4).
+  assert.equal(deviceTypeOf({ Header: { Device: 87 } }), '87');
+  assert.equal(deviceTypeOf({ Header: { Device: 8.5 } }), undefined);
+  assert.equal(deviceTypeOf({ Header: { Device: 999 } }), undefined);
 });
 
 test('a republished device keeps the features and the shapes it was created with', () => {
