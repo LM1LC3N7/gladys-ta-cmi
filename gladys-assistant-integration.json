@@ -6,8 +6,8 @@
     "en": "Technische Alternative controllers (UVR16x2, UVR1611…) read only through the C.M.I.",
     "fr": "Régulations Technische Alternative (UVR16x2, UVR1611…) en lecture seule par le C.M.I."
   },
-  "version": "0.1.1",
-  "docker_image": "ghcr.io/lm1lc3n7/gladys-ta-cmi:0.1.1",
+  "version": "0.1.2",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-ta-cmi:0.1.2",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-ta-cmi/main/cover.png",
   "categories": ["climate", "energy"],

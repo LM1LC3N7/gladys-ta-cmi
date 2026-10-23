@@ -1,6 +1,6 @@
 {
   "name": "gladys-ta-cmi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Gladys Assistant external integration for Technische Alternative controllers through the C.M.I. JSON API (read only). Not affiliated with Technische Alternative.",
   "type": "module",
